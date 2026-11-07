@@ -18,9 +18,17 @@
 - 功耗：整机实时功率、充电器瓦数、电池温度
 - 状态：系统负载（1/5/15 分钟）、内存压力、温控状态（偏热以上会降频）
 - 我的进程：CPU 和内存占用最高的前 3 个进程（只统计当前用户的进程，系统进程需要管理员权限才能读）
+- 温度与风扇：CPU / GPU 平均温度、最高温度、风扇转速（读 SMC 传感器，首次运行会扫描一次传感器并缓存）
+- 磁盘读写：实时读写速度、外接磁盘（窗口里可一键推出）
+- Wi‑Fi：信号强度、噪声、连接速率、频段和信道、Wi‑Fi 标准（不读 Wi‑Fi 名称，因为那需要定位权限）
+- 外设电量：妙控鼠标 / 键盘 / 触控板等蓝牙外设的电量
+- 显示器：已连接显示器的分辨率和刷新率（面板默认隐藏）
+- 进程网络流量（仅窗口）：按下载 / 上传排序，包含系统进程，用系统自带的 `nettop` 读取，只在窗口打开时运行
 - 运行时间，以及打开窗口、设置、退出按钮
 
-设置项：语言（跟随系统 / 简体中文 / English）、登录时启动、打开应用时是否显示窗口、温度单位、刷新间隔（1 / 2 / 5 秒）、后台记录历史、面板显示哪些项、窗口置顶。
+设置项：语言（跟随系统 / 简体中文 / English）、登录时启动、打开应用时是否显示窗口、温度单位、刷新间隔（1 / 2 / 5 秒）、后台记录历史、显示内容（每一项分别勾选在面板 / 窗口里显示）、窗口置顶。
+
+没勾选的项不会读取。变化慢或开销大的数据按更低频率刷新：进程列表、进程网络、Wi‑Fi 每 3 秒，磁盘容量、外接磁盘、外设、显示器每 10 秒。
 
 数据全部在本地读取（`sysctl`、`host_processor_info`、`host_statistics64`、`getifaddrs`、`proc_pid_rusage`、IOKit、`URLResourceValues`），不联网。
 只在面板或窗口打开时按设置的间隔刷新，都关上后停止轮询、不占 CPU（除非打开了「后台记录历史」，那样会每 5 秒采样一次）。
@@ -53,6 +61,7 @@ build/SysInfoBar.app/Contents/MacOS/SysInfoBar --dump
 
 - `SYSINFOBAR_DEBUG=1 build/SysInfoBar.app/Contents/MacOS/SysInfoBar`：在 stderr 打印 `polling start / tick / polling stop`
 - 再加 `SYSINFOBAR_SELFTEST=1`：自动开关窗口并打印程序坞图标 / 轮询状态
+- `build/SysInfoBar.app/Contents/MacOS/SysInfoBar --bench`：测量每次刷新的采集耗时和界面更新耗时（`BENCH_ONLY=dashboard|panel|none` 只测一部分）
 - `build/SysInfoBar.app/Contents/MacOS/SysInfoBar --snapshot <目录>`：把面板、窗口、设置按中英文 × 浅色深色渲染成 PNG，不需要屏幕录制权限
 
 ## 开机自启

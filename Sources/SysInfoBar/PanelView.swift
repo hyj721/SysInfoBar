@@ -35,11 +35,27 @@ struct PanelView: View {
                           fraction: s.gpuUtil ?? 0)
             }
 
+            if settings.shows(.thermals), let t = s.thermals {
+                MetricRow(icon: "thermometer.medium", title: tr("温度与风扇", "Temperature"),
+                          subtitle: fanText(t),
+                          value: thermalValue(t),
+                          fraction: (t.cpuAvg ?? 0) / 100,
+                          tint: tempColor(t.cpuMax ?? t.cpuAvg ?? 0))
+            }
+
             if settings.shows(.disk) {
                 MetricRow(icon: "internaldrive", title: tr("磁盘", "Disk"),
                           subtitle: "\(s.volumeName) · " + tr("可用 ", "Free ") + Fmt.disk(s.diskFree),
                           value: "\(Fmt.disk(s.diskTotal - s.diskFree)) / \(Fmt.disk(s.diskTotal))",
                           fraction: s.diskTotal > 0 ? Double(s.diskTotal - s.diskFree) / Double(s.diskTotal) : 0)
+            }
+
+            if settings.shows(.diskIO) {
+                MetricRow(icon: "arrow.up.arrow.down.circle", title: tr("磁盘读写", "Disk activity"),
+                          subtitle: s.volumes.isEmpty ? tr("无外接磁盘", "No external drives")
+                            : tr("外接：", "External: ") + s.volumes.map(\.name).joined(separator: ", "),
+                          value: tr("读 ", "R ") + Fmt.rate(s.diskRead) + "  " + tr("写 ", "W ") + Fmt.rate(s.diskWrite),
+                          fraction: nil, tint: .mint)
             }
 
             if settings.shows(.network) {
@@ -48,6 +64,13 @@ struct PanelView: View {
                             .ifEmpty(tr("未连接", "Not connected")),
                           value: "↓ \(Fmt.rate(s.netDown))   ↑ \(Fmt.rate(s.netUp))",
                           fraction: nil, tint: .indigo)
+            }
+
+            if settings.shows(.wifi), let w = s.wifi {
+                MetricRow(icon: "wifi", title: "Wi‑Fi",
+                          subtitle: wifiSubtitle(w),
+                          value: "\(w.rssi) dBm · " + signalText(w.rssi),
+                          fraction: signalFraction(w.rssi), tint: signalColor(w.rssi))
             }
 
             if let b = s.battery {
@@ -64,6 +87,22 @@ struct PanelView: View {
                               value: String(format: "%.1f W", w),
                               fraction: nil, tint: .yellow)
                 }
+            }
+
+            if settings.shows(.peripherals), !s.peripherals.isEmpty {
+                MetricRow(icon: "computermouse", title: tr("外设电量", "Peripherals"),
+                          subtitle: s.peripherals.map { "\($0.name) \($0.percent)%" }.joined(separator: " · "),
+                          value: "\(s.peripherals.map(\.percent).min() ?? 0)%",
+                          fraction: Double(s.peripherals.map(\.percent).min() ?? 0) / 100,
+                          tint: (s.peripherals.map(\.percent).min() ?? 100) <= 20 ? .red : .green)
+            }
+
+            if settings.shows(.displays), !s.displays.isEmpty {
+                MetricRow(icon: "display", title: tr("显示器", "Displays"),
+                          subtitle: s.displays.map { "\($0.name) \($0.pixelWidth)×\($0.pixelHeight) \($0.refresh) Hz" }
+                            .joined(separator: " · "),
+                          value: tr("\(s.displays.count) 台", "\(s.displays.count)"),
+                          fraction: nil, tint: .cyan)
             }
 
             if settings.shows(.processes) {
@@ -115,6 +154,29 @@ struct PanelView: View {
     }
 
     // MARK: formatting
+
+    private func thermalValue(_ t: Thermals) -> String {
+        var parts: [String] = []
+        if let c = t.cpuAvg { parts.append("CPU " + settings.temperatureShort(c)) }
+        if let g = t.gpuAvg { parts.append("GPU " + settings.temperatureShort(g)) }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+    private func fanText(_ t: Thermals) -> String {
+        var parts: [String] = []
+        if let m = t.cpuMax { parts.append(tr("最高 ", "Peak ") + settings.temperatureShort(m)) }
+        if t.fans.isEmpty { parts.append(tr("无风扇", "No fans")) }
+        else if t.fans.allSatisfy({ $0.rpm < 1 }) { parts.append(tr("风扇停转", "Fans off")) }
+        else { parts.append(tr("风扇 ", "Fans ") + t.fans.map { "\(Int($0.rpm))" }.joined(separator: " / ") + " RPM") }
+        return parts.joined(separator: " · ")
+    }
+    private func wifiSubtitle(_ w: WiFiInfo) -> String {
+        var parts: [String] = []
+        if let b = w.bandGHz { parts.append("\(b) GHz") }
+        if let c = w.channel { parts.append(tr("信道 \(c)", "Ch \(c)")) }
+        parts.append("\(Int(w.txRate)) Mbps")
+        if let std = w.standard { parts.append(std) }
+        return parts.joined(separator: " · ")
+    }
 
     private func powerSubtitle(_ b: Snapshot.Battery) -> String {
         var parts: [String] = []
@@ -376,3 +438,20 @@ struct ProcessTable: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+// MARK: - Shared helpers for temperature and Wi‑Fi
+
+func tempColor(_ c: Double) -> Color { c < 70 ? .green : c < 85 ? .orange : .red }
+
+func signalFraction(_ rssi: Int) -> Double { min(max(Double(rssi + 90) / 60, 0), 1) }   // -90 dBm … -30 dBm
+
+func signalText(_ rssi: Int) -> String {
+    switch rssi {
+    case (-50)...: return tr("极好", "Excellent")
+    case (-60)...: return tr("良好", "Good")
+    case (-70)...: return tr("一般", "Fair")
+    default: return tr("较弱", "Weak")
+    }
+}
+
+func signalColor(_ rssi: Int) -> Color { rssi >= -60 ? .green : rssi >= -70 ? .orange : .red }

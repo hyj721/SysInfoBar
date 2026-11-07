@@ -30,7 +30,7 @@ enum Fmt {
 struct DashboardView: View {
     @EnvironmentObject var m: Monitor
     @EnvironmentObject var settings: AppSettings
-    @State private var sortByMemory = false
+    @State private var sort: ProcSort = .cpu
 
     var body: some View {
         let info = m.info, s = m.snap, h = m.history
@@ -79,8 +79,13 @@ struct DashboardView: View {
                     }
                 }
 
-                Card(title: tr("我的进程", "My processes"), trailing: nil) {
-                    ProcessList(cpu: s.topCPU, mem: s.topMem, sortByMemory: $sortByMemory, lang: settings.language)
+                optionalCards(s, h)
+
+                Card(title: tr("进程", "Processes"), trailing: nil) {
+                    ProcessList(cpu: s.topCPU, mem: s.topMem, net: s.netProcs,
+                                showNetwork: settings.windowShows(.processNetwork),
+                                sort: $sort, lang: settings.language)
+                        .equatable()
                 }
 
                 Text(tr("曲线显示最近 5 分钟 · 数据只在本机读取，不联网",
@@ -118,6 +123,58 @@ struct DashboardView: View {
             Button { WindowManager.shared.showSettings() } label: { Image(systemName: "gearshape") }
                 .help(tr("设置", "Settings"))
         }
+    }
+
+    /// Optional cards, two per row; hidden or unavailable ones leave no gap.
+    @ViewBuilder private func optionalCards(_ s: Snapshot, _ h: History) -> some View {
+        let cards = optionalCardList(s, h)
+        VStack(spacing: 12) {
+            ForEach(Array(stride(from: 0, to: cards.count, by: 2)), id: \.self) { i in
+                HStack(alignment: .top, spacing: 12) {
+                    cards[i].view
+                    if i + 1 < cards.count { cards[i + 1].view }
+                }
+            }
+        }
+    }
+
+    private struct OptionalCard { let view: AnyView }
+
+    private func optionalCardList(_ s: Snapshot, _ h: History) -> [OptionalCard] {
+        var out: [OptionalCard] = []
+        if settings.windowShows(.thermals), let t = s.thermals {
+            out.append(OptionalCard(view: AnyView(
+                Card(title: tr("温度与风扇", "Temperature and fans"),
+                     trailing: t.cpuMax.map { tr("最高 ", "Peak ") + settings.temperature($0) }) {
+                    ThermalsView(t: t, history: h.cpuTemp, settings: settings)
+                })))
+        }
+        if settings.windowShows(.diskIO) {
+            out.append(OptionalCard(view: AnyView(
+                Card(title: tr("磁盘读写", "Disk activity"),
+                     trailing: tr("读 ", "R ") + Fmt.rate(s.diskRead) + "  " + tr("写 ", "W ") + Fmt.rate(s.diskWrite)) {
+                    DiskIOView(read: h.diskRead, write: h.diskWrite, volumes: s.volumes, lang: settings.language)
+                })))
+        }
+        if settings.windowShows(.wifi), let w = s.wifi {
+            out.append(OptionalCard(view: AnyView(
+                Card(title: "Wi‑Fi", trailing: "\(w.rssi) dBm · " + signalText(w.rssi)) {
+                    WiFiView(w: w, lang: settings.language).equatable()
+                })))
+        }
+        let showPeriph = settings.windowShows(.peripherals)
+        let showDisplays = settings.windowShows(.displays) && !s.displays.isEmpty
+        if showPeriph || showDisplays {
+            let title = showPeriph && showDisplays ? tr("外设与显示器", "Peripherals and displays")
+                : showPeriph ? tr("外设电量", "Peripheral batteries") : tr("显示器", "Displays")
+            out.append(OptionalCard(view: AnyView(
+                Card(title: title, trailing: nil) {
+                    DevicesView(peripherals: showPeriph ? s.peripherals : nil,
+                                displays: showDisplays ? s.displays : [], lang: settings.language)
+                        .equatable()
+                })))
+        }
+        return out
     }
 
     @ViewBuilder private func diskBattery(_ s: Snapshot) -> some View {
@@ -249,7 +306,10 @@ struct Sparkline: View {
         guard let first = series.points.first?.t, let last = series.points.last?.t, maxValue > 0 else { return [] }
         // Fill the width from 30 s of data on, then scroll within the 5-minute window.
         let span = min(max(last - first, 30), Series.span)
-        return series.points.map { pt in
+        // At most ~120 points per line: enough detail for a small chart, bounded drawing cost.
+        let step = max(1, series.points.count / 120)
+        let pts = step == 1 ? series.points : stride(from: 0, to: series.points.count, by: step).map { series.points[$0] }
+        return pts.map { pt in
             let x = size.width * (1 - CGFloat((last - pt.t) / span))
             let y = size.height * (1 - CGFloat(min(pt.v / maxValue, 1)))
             return CGPoint(x: x, y: max(1, y))
@@ -364,19 +424,30 @@ struct NetworkChart: View {
     }
 }
 
-struct ProcessList: View {
+enum ProcSort: Hashable { case cpu, mem, net }
+
+struct ProcessList: View, Equatable {
+    /// Skip re-rendering when the rows haven't changed (they refresh every 3 s, the window every 1–2 s).
+    static func == (a: ProcessList, b: ProcessList) -> Bool {
+        a.cpu == b.cpu && a.mem == b.mem && a.net == b.net && a.showNetwork == b.showNetwork
+            && a.sort == b.sort && a.lang == b.lang
+    }
+
     let cpu: [ProcStat]
     let mem: [ProcStat]
-    @Binding var sortByMemory: Bool
+    let net: [NetProc]
+    let showNetwork: Bool
+    @Binding var sort: ProcSort
     let lang: AppLanguage
 
     var body: some View {
-        let rows = sortByMemory ? mem : cpu
+        let mode: ProcSort = (sort == .net && !showNetwork) ? .cpu : sort
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Picker(selection: $sortByMemory) {
-                    Text(tr("按 CPU", "By CPU")).tag(false)
-                    Text(tr("按内存", "By memory")).tag(true)
+                Picker(selection: $sort) {
+                    Text(tr("按 CPU", "By CPU")).tag(ProcSort.cpu)
+                    Text(tr("按内存", "By memory")).tag(ProcSort.mem)
+                    if showNetwork { Text(tr("按网络", "By network")).tag(ProcSort.net) }
                 } label: { EmptyView() }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
                 Spacer()
@@ -386,40 +457,240 @@ struct ProcessList: View {
                     Label(tr("活动监视器", "Activity Monitor"), systemImage: "arrow.up.forward.app")
                 }
             }
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 5) {
-                GridRow {
-                    Text(tr("名称", "Name"))
-                    Text("PID").gridColumnAlignment(.trailing)
-                    Text("CPU").gridColumnAlignment(.trailing)
-                    Text(tr("内存", "Memory")).gridColumnAlignment(.trailing)
-                }
-                .font(.caption).foregroundStyle(.secondary)
-                Divider().gridCellColumns(4)
-                if rows.isEmpty {
-                    Text("…").foregroundStyle(.tertiary)
-                }
-                ForEach(rows) { p in
-                    GridRow {
-                        HStack(spacing: 6) {
-                            if let icon = AppIcons.icon(for: p.pid) {
-                                Image(nsImage: icon).resizable().frame(width: 16, height: 16)
-                            } else {
-                                Image(systemName: "gearshape").frame(width: 16, height: 16).foregroundStyle(.tertiary)
-                            }
-                            Text(p.name).lineLimit(1).truncationMode(.middle)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("\(p.pid)").foregroundStyle(.secondary)
-                        Text(String(format: "%.1f%%", p.cpu * 100))
-                        Text(Fmt.mem(p.mem))
-                    }
-                    .font(.system(size: 12).monospacedDigit())
-                }
-            }
-            Text(tr("只统计当前用户的进程；系统进程需要管理员权限才能读取",
-                    "Only your own processes are listed; system processes need admin rights to read"))
+            if mode == .net { netTable } else { usageTable(mode == .mem ? mem : cpu) }
+            Text(mode == .net
+                 ? tr("包含系统进程；数据来自系统自带的 nettop，只在窗口打开时运行",
+                      "Includes system processes; read with the built-in nettop tool, only while the window is open")
+                 : tr("只统计当前用户的进程；系统进程需要管理员权限才能读取",
+                      "Only your own processes are listed; system processes need admin rights to read"))
                 .font(.caption2).foregroundStyle(.tertiary)
         }
+    }
+
+    private func nameCell(_ pid: pid_t, _ name: String) -> some View {
+        HStack(spacing: 6) {
+            if let icon = AppIcons.icon(for: pid) {
+                Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+            } else {
+                Image(systemName: "gearshape").frame(width: 16, height: 16).foregroundStyle(.tertiary)
+            }
+            Text(name).lineLimit(1).truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func usageTable(_ rows: [ProcStat]) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 5) {
+            GridRow {
+                Text(tr("名称", "Name"))
+                Text("PID").gridColumnAlignment(.trailing)
+                Text("CPU").gridColumnAlignment(.trailing)
+                Text(tr("内存", "Memory")).gridColumnAlignment(.trailing)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            Divider().gridCellColumns(4)
+            if rows.isEmpty { Text("…").foregroundStyle(.tertiary) }
+            ForEach(rows) { p in
+                GridRow {
+                    nameCell(p.pid, p.name)
+                    Text("\(p.pid)").foregroundStyle(.secondary)
+                    Text(String(format: "%.1f%%", p.cpu * 100))
+                    Text(Fmt.mem(p.mem))
+                }
+                .font(.system(size: 12).monospacedDigit())
+            }
+        }
+    }
+
+    private var netTable: some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 5) {
+            GridRow {
+                Text(tr("名称", "Name"))
+                Text("PID").gridColumnAlignment(.trailing)
+                Text(tr("下载", "Down")).gridColumnAlignment(.trailing)
+                Text(tr("上传", "Up")).gridColumnAlignment(.trailing)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            Divider().gridCellColumns(4)
+            if net.isEmpty {
+                Text(tr("正在收集数据…", "Collecting data…")).foregroundStyle(.tertiary).gridCellColumns(4)
+            }
+            ForEach(net) { p in
+                GridRow {
+                    nameCell(pid_t(p.pid), p.name)
+                    Text("\(p.pid)").foregroundStyle(.secondary)
+                    Text(Fmt.rate(p.down))
+                    Text(Fmt.rate(p.up))
+                }
+                .font(.system(size: 12).monospacedDigit())
+            }
+        }
+    }
+}
+
+// MARK: - Optional cards
+
+struct ThermalsView: View {
+    let t: Thermals
+    let history: Series
+    let settings: AppSettings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 18) {
+                reading("CPU", t.cpuAvg)
+                reading("GPU", t.gpuAvg)
+                Spacer()
+            }
+            Sparkline(series: history, maxValue: 100, color: tempColor(t.cpuMax ?? 0)).frame(height: 34)
+            if t.fans.isEmpty {
+                Text(tr("这台 Mac 没有风扇", "This Mac has no fans")).font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(Array(t.fans.enumerated()), id: \.offset) { i, f in
+                HStack(spacing: 8) {
+                    Image(systemName: "fan").foregroundStyle(.secondary)
+                    Text(tr("风扇 \(i + 1)", "Fan \(i + 1)")).font(.caption)
+                    Bar(fraction: f.max > 0 ? f.rpm / f.max : 0, color: .teal)
+                    Text(f.rpm < 1 ? tr("停转", "Off") : "\(Int(f.rpm)) RPM")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .frame(width: 70, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    private func reading(_ label: String, _ v: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(v.map(settings.temperature) ?? "—")
+                .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                .foregroundStyle(v.map(tempColor) ?? .secondary)
+        }
+    }
+}
+
+struct DiskIOView: View {
+    let read: Series
+    let write: Series
+    let volumes: [VolumeInfo]
+    let lang: AppLanguage
+    @State private var ejectError: String?
+
+    var body: some View {
+        let top = max(read.maxValue, write.maxValue, 1_000_000) * 1.15
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                Sparkline(series: read, maxValue: top, color: .mint)
+                Sparkline(series: write, maxValue: top, color: .pink, fill: false)
+            }
+            .frame(height: 50)
+            HStack(spacing: 12) {
+                legend(.mint, tr("读取", "Read"))
+                legend(.pink, tr("写入", "Write"))
+                Spacer()
+                Text(tr("峰值 ", "Peak ") + Fmt.rate(max(read.maxValue, write.maxValue)))
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            if volumes.isEmpty {
+                Text(tr("没有外接磁盘", "No external drives")).font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(volumes) { v in
+                HStack(spacing: 6) {
+                    Image(systemName: "externaldrive").foregroundStyle(.secondary)
+                    Text(v.name).font(.caption).lineLimit(1)
+                    Spacer()
+                    Text(tr("可用 ", "Free ") + Fmt.disk(v.free) + " / " + Fmt.disk(v.total))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    if v.ejectable {
+                        Button {
+                            do { try NSWorkspace.shared.unmountAndEjectDevice(at: v.url); ejectError = nil }
+                            catch { ejectError = tr("无法推出「\(v.name)」，可能正在使用", "Couldn't eject \(v.name). It may be in use.") }
+                        } label: { Image(systemName: "eject") }
+                        .buttonStyle(.borderless)
+                        .help(tr("推出", "Eject"))
+                    }
+                }
+            }
+            if let ejectError { Text(ejectError).font(.caption).foregroundStyle(.red) }
+        }
+    }
+
+    private func legend(_ c: Color, _ t: String) -> some View {
+        HStack(spacing: 4) { Circle().fill(c).frame(width: 6, height: 6); Text(t) }
+    }
+}
+
+struct WiFiView: View, Equatable {
+    let w: WiFiInfo
+    let lang: AppLanguage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Bar(fraction: signalFraction(w.rssi), color: signalColor(w.rssi))
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
+                row(tr("信号", "Signal"), "\(w.rssi) dBm")
+                row(tr("噪声", "Noise"), "\(w.noise) dBm")
+                row(tr("信噪比", "SNR"), "\(w.rssi - w.noise) dB")
+                row(tr("连接速率", "Link rate"), "\(Int(w.txRate)) Mbps")
+                row(tr("频段 / 信道", "Band / channel"),
+                    [w.bandGHz.map { "\($0) GHz" }, w.channel.map { "\($0)" }].compactMap { $0 }.joined(separator: " / "))
+                if let std = w.standard { row(tr("标准", "Standard"), std) }
+                row(tr("网卡", "Interface"), w.iface)
+            }
+            .font(.caption)
+        }
+    }
+
+    private func row(_ k: String, _ v: String) -> some View {
+        GridRow {
+            Text(k).foregroundStyle(.secondary)
+            Text(v).monospacedDigit()
+        }
+    }
+}
+
+struct DevicesView: View, Equatable {
+    let peripherals: [Peripheral]?
+    let displays: [DisplayInfo]
+    let lang: AppLanguage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let peripherals {
+                if peripherals.isEmpty {
+                    Text(tr("没有连接带电池的蓝牙外设", "No Bluetooth peripherals with a battery"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(peripherals) { p in
+                    HStack(spacing: 6) {
+                        Image(systemName: icon(p.name)).foregroundStyle(.secondary).frame(width: 18)
+                        Text(p.name).font(.caption).lineLimit(1)
+                        Spacer()
+                        Bar(fraction: Double(p.percent) / 100, color: p.percent <= 20 ? .red : .green).frame(width: 60)
+                        Text("\(p.percent)%").font(.caption.monospacedDigit()).frame(width: 36, alignment: .trailing)
+                    }
+                }
+                if !displays.isEmpty { Divider() }
+            }
+            ForEach(displays) { d in
+                HStack(spacing: 6) {
+                    Image(systemName: d.builtIn ? "laptopcomputer" : "display").foregroundStyle(.secondary).frame(width: 18)
+                    Text(d.name).font(.caption).lineLimit(1)
+                    Spacer()
+                    Text("\(d.pixelWidth)×\(d.pixelHeight) · \(d.refresh) Hz")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func icon(_ name: String) -> String {
+        let n = name.lowercased()
+        if n.contains("mouse") { return "computermouse" }
+        if n.contains("keyboard") { return "keyboard" }
+        if n.contains("trackpad") { return "rectangle.and.hand.point.up.left" }
+        return "dot.radiowaves.left.and.right"
     }
 }
 

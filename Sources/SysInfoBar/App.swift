@@ -42,6 +42,10 @@ struct SysInfoBarApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--bench") {
+            MainActor.assumeIsolated { Snapshotter.bench() }
+            exit(0)
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
             MainActor.assumeIsolated { Snapshotter.run(into: CommandLine.arguments[i + 1]) }
             exit(0)
@@ -83,6 +87,7 @@ struct Series {
 
 struct History {
     var cpu = Series(), mem = Series(), gpu = Series(), power = Series(), down = Series(), up = Series()
+    var cpuTemp = Series(), diskRead = Series(), diskWrite = Series()
     mutating func clear() { self = History() }
 }
 
@@ -97,6 +102,8 @@ final class Monitor: ObservableObject {
     @Published private(set) var history = History()
 
     private lazy var sampler = Sampler(info: info)
+    private let netTop = NetTopRunner()
+    private var lastNetTopPoll: TimeInterval = -.infinity
     private var timer: Timer?
     private var currentInterval: TimeInterval = 0
     private var panelVisible = false
@@ -114,6 +121,38 @@ final class Monitor: ObservableObject {
         s.$recordInBackground.dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async { self?.reschedule() }
         }.store(in: &bag)
+        s.$hiddenWindowSections.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.updateNetTop() }
+        }.store(in: &bag)
+    }
+
+    /// Debug snapshots: read everything, never schedule a timer.
+    private var forceAll = false
+
+    /// Readings some visible view needs right now.
+    private var options: SampleOptions {
+        if forceAll { return .all }
+        let s = AppSettings.shared
+        func want(_ p: PanelSection, _ w: WindowSection) -> Bool {
+            (panelVisible && s.shows(p)) || (windowVisible && s.windowShows(w))
+        }
+        var o = SampleOptions()
+        o.thermals = want(.thermals, .thermals)
+        o.diskIO = want(.diskIO, .diskIO)
+        o.volumes = o.diskIO
+        o.wifi = want(.wifi, .wifi)
+        o.peripherals = want(.peripherals, .peripherals)
+        o.displays = want(.displays, .displays)
+        return o
+    }
+
+    /// `nettop` runs only while the window is open and shows network by process.
+    private func updateNetTop() {
+        if windowVisible && AppSettings.shared.windowShows(.processNetwork) {
+            netTop.start()
+        } else {
+            netTop.stop()
+        }
     }
 
     private func log(_ msg: String) {
@@ -145,6 +184,7 @@ final class Monitor: ObservableObject {
     }
 
     private func reschedule() {
+        updateNetTop()
         guard let interval = wantedInterval else { stop(); return }
         if timer != nil && interval == currentInterval { return }
         let fresh = timer == nil
@@ -178,8 +218,13 @@ final class Monitor: ObservableObject {
 
     private func refresh() {
         // Safety net: the panel can close without a notification reaching us.
-        if panelVisible && !isPanelVisible() { panelVisible = false; reschedule(); if timer == nil { return } }
-        let s = sampler.sample()
+        if !forceAll && panelVisible && !isPanelVisible() { panelVisible = false; reschedule(); if timer == nil { return } }
+        var s = sampler.sample(options)
+        if netTop.isRunning {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastNetTopPoll >= 2.75 { netTop.poll(); lastNetTopPoll = now }   // nettop at most every 3 s
+            s.netProcs = netTop.top(10)
+        }
         snap = s
         let now = ProcessInfo.processInfo.systemUptime
         var h = history
@@ -189,25 +234,33 @@ final class Monitor: ObservableObject {
         if let w = s.battery?.systemWatts { h.power.add(w, at: now) }
         h.down.add(s.netDown, at: now)
         h.up.add(s.netUp, at: now)
+        if let t = s.thermals?.cpuAvg { h.cpuTemp.add(t, at: now) }
+        if options.diskIO {
+            h.diskRead.add(s.diskRead, at: now)
+            h.diskWrite.add(s.diskWrite, at: now)
+        }
         history = h
-        log(String(format: "tick cpu=%.0f%%", s.cpuTotal * 100))
+        log(String(format: "tick cpu=%.0f%% netProcs=%d temp=%@", s.cpuTotal * 100, s.netProcs.count, s.thermals?.cpuAvg.map { String(format: "%.0f", $0) } ?? "-"))
     }
 
     /// Debug: take a few samples one second apart so the views have data and history.
     func debugWarmUp(samples: Int) {
+        forceAll = true
         sampler.reset()
         for i in 0..<samples {
-            if i > 0 { Thread.sleep(forTimeInterval: 1) }
+            if i > 0 { RunLoop.main.run(until: Date().addingTimeInterval(1)) }
             refresh()
         }
     }
 
+    func debugTick() { refresh() }
+
     nonisolated static func dump() {
         let info = StaticInfo.read()
         let sampler = Sampler(info: info)
-        _ = sampler.sample()
-        Thread.sleep(forTimeInterval: 1)
-        let s = sampler.sample()
+        _ = sampler.sample(.all)          // starts SMC key discovery (finishes on the main run loop)
+        RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+        let s = sampler.sample(.all)
         func mb(_ b: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(b), countStyle: .memory) }
         print("""
         Model   : \(info.modelName) [\(info.modelID)]
@@ -224,6 +277,11 @@ final class Monitor: ObservableObject {
         Top CPU : \(s.topCPU.prefix(5).map { "\($0.name)(\($0.pid)) \(Int($0.cpu * 100))%" })
         Top Mem : \(s.topMem.prefix(5).map { "\($0.name)(\($0.pid)) \(Int($0.mem / 1048576)) MB" })
         Power   : \(s.battery.map { "system \($0.systemWatts.map { String(format: "%.1f W", $0) } ?? "-") adapter \($0.adapterWatts ?? -1) W temp \($0.temperature ?? -1) C" } ?? "-")
+        Thermals: \(s.thermals.map { "cpu avg \($0.cpuAvg.map { String(format: "%.1f", $0) } ?? "-") max \($0.cpuMax.map { String(format: "%.1f", $0) } ?? "-") gpu \($0.gpuAvg.map { String(format: "%.1f", $0) } ?? "-") fans \($0.fans.map { "\(Int($0.rpm))/\(Int($0.max))" })" } ?? "unavailable (first run scans SMC keys)")
+        Disk IO : read \(Int(s.diskRead)) B/s write \(Int(s.diskWrite)) B/s  external volumes \(s.volumes.map(\.name))
+        Wi-Fi   : \(s.wifi.map { "\($0.iface) rssi \($0.rssi) noise \($0.noise) \(Int($0.txRate)) Mbps ch \($0.channel ?? -1) \($0.bandGHz ?? "?") GHz \($0.standard ?? "?")" } ?? "off")
+        Periph  : \(s.peripherals.map { "\($0.name) \($0.percent)%" })
+        Displays: \(s.displays.map { "\($0.name) \($0.pixelWidth)x\($0.pixelHeight) \($0.refresh)Hz builtin=\($0.builtIn)" })
         Battery : \(s.battery.map { "\($0.percent)% charging=\($0.charging) plugged=\($0.pluggedIn) cycles=\($0.cycles ?? -1) health=\($0.health ?? -1)%" } ?? "none")
         """)
     }

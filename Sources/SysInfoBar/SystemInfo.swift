@@ -134,6 +134,15 @@ struct Snapshot {
     var topCPU: [ProcStat] = []
     var topMem: [ProcStat] = []
     var status = SystemStatus()
+    // Optional readings (see SampleOptions)
+    var thermals: Thermals?
+    var diskRead: Double = 0              // bytes/s
+    var diskWrite: Double = 0
+    var volumes: [VolumeInfo] = []
+    var wifi: WiFiInfo?
+    var peripherals: [Peripheral] = []
+    var displays: [DisplayInfo] = []
+    var netProcs: [NetProc] = []
 
     struct Battery {
         var percent: Int
@@ -157,8 +166,12 @@ final class Sampler {
     private var batteryService: io_service_t?
     private var net = NetworkSampler()
     private var procs = ProcessSampler()
+    private var diskIO = DiskIOSampler()
+    private lazy var smc = SMCReader(modelID: modelID)
+    private let modelID: String
 
     init(info: StaticInfo) {
+        modelID = info.modelID
         gpuService = IOReg.service("AGXAccelerator")
         if info.hasBattery { batteryService = IOReg.service("AppleSmartBattery") }
     }
@@ -173,21 +186,60 @@ final class Sampler {
         prevTicks = []
         net = NetworkSampler()
         procs = ProcessSampler()
+        diskIO = DiskIOSampler()
+        cache = Cache()
+        lastProcs = -.infinity; lastWiFi = -.infinity; lastRare = -.infinity
     }
 
-    func sample() -> Snapshot {
+    func sample(_ opts: SampleOptions = SampleOptions()) -> Snapshot {
         var s = Snapshot()
         readCPU(into: &s)
         readMemory(into: &s)
         readGPU(into: &s)
-        readDisk(into: &s)
         readUptime(into: &s)
         readBattery(into: &s)
         let n = net.sample()
         s.netDown = n.down; s.netUp = n.up; s.netIface = n.iface; s.netIP = n.ip
-        (s.topCPU, s.topMem) = procs.sample()
         s.status = SystemStatus.read()
+        if opts.thermals { s.thermals = smc.read() }
+        if opts.diskIO { (s.diskRead, s.diskWrite) = diskIO.sample() }
+
+        // Slower tiers: values that change slowly or cost more are refreshed less often and reused in between.
+        let now = ProcessInfo.processInfo.systemUptime
+        if due(&lastProcs, 3, now) { cache.procs = procs.sample() }
+        (s.topCPU, s.topMem) = cache.procs
+        if opts.wifi {
+            if cache.wifi == nil || due(&lastWiFi, 3, now) { cache.wifi = .some(WiFiReader.read()) }
+            s.wifi = cache.wifi ?? nil
+        }
+        let rare = due(&lastRare, 10, now)
+        // Free-space lookup costs ~8 ms; disk usage changes slowly.
+        if rare || cache.disk == nil { var d = Snapshot(); readDisk(into: &d); cache.disk = (d.diskTotal, d.diskFree, d.volumeName) }
+        if let d = cache.disk { s.diskTotal = d.0; s.diskFree = d.1; s.volumeName = d.2 }
+        if opts.volumes { if rare || cache.volumes == nil { cache.volumes = Volumes.external() }; s.volumes = cache.volumes ?? [] }
+        if opts.peripherals { if rare || cache.peripherals == nil { cache.peripherals = PeripheralReader.read() }; s.peripherals = cache.peripherals ?? [] }
+        if opts.displays { if rare || cache.displays == nil { cache.displays = DisplayReader.read() }; s.displays = cache.displays ?? [] }
         return s
+    }
+
+    private struct Cache {
+        var procs: (cpu: [ProcStat], mem: [ProcStat]) = ([], [])
+        var wifi: WiFiInfo??
+        var volumes: [VolumeInfo]?
+        var peripherals: [Peripheral]?
+        var displays: [DisplayInfo]?
+        var disk: (Int64, Int64, String)?
+    }
+    private var cache = Cache()
+    private var lastProcs: TimeInterval = -.infinity
+    private var lastWiFi: TimeInterval = -.infinity
+    private var lastRare: TimeInterval = -.infinity
+
+    /// True (and stamps `last`) when at least `every` seconds have passed.
+    private func due(_ last: inout TimeInterval, _ every: TimeInterval, _ now: TimeInterval) -> Bool {
+        guard now - last >= every - 0.25 else { return false }
+        last = now
+        return true
     }
 
     private func readCPU(into s: inout Snapshot) {

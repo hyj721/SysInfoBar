@@ -17,12 +17,47 @@ enum Snapshotter {
                 render(PanelView().environmentObject(m).environmentObject(s),
                        size: nil, dark: dark, to: "\(dir)/panel-\(tag).png")
                 render(DashboardView().environmentObject(m).environmentObject(s),
-                       size: NSSize(width: 780, height: 900), dark: dark, to: "\(dir)/dashboard-\(tag).png")
+                       size: NSSize(width: 780, height: 1500), dark: dark, to: "\(dir)/dashboard-\(tag).png")
                 render(SettingsView().environmentObject(s),
-                       size: NSSize(width: 480, height: 1100), dark: dark, to: "\(dir)/settings-\(tag).png")
+                       size: NSSize(width: 480, height: 1500), dark: dark, to: "\(dir)/settings-\(tag).png")
             }
         }
         s.language = savedLang
+    }
+
+    /// `--bench`: CPU time per refresh for sampling and for re-rendering the dashboard and panel.
+    static func bench() {
+        let m = Monitor.shared
+        m.debugWarmUp(samples: 2)
+        func cpuNow() -> Double {
+            var u = rusage(); getrusage(RUSAGE_SELF, &u)
+            return Double(u.ru_utime.tv_sec + u.ru_stime.tv_sec) + Double(u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1e6
+        }
+        let s = AppSettings.shared
+        func host<V: View>(_ v: V, _ size: NSSize) -> NSHostingView<AnyView> {
+            let h = NSHostingView(rootView: AnyView(v))
+            let w = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+            w.contentView = h
+            h.frame = NSRect(origin: .zero, size: size)
+            return h
+        }
+        let only = ProcessInfo.processInfo.environment["BENCH_ONLY"]
+        var hosts: [NSView] = []
+        if only != "panel" && only != "none" { hosts.append(host(DashboardView().environmentObject(m).environmentObject(s), NSSize(width: 780, height: 1500))) }
+        if only != "dashboard" && only != "none" { hosts.append(host(PanelView().environmentObject(m).environmentObject(s), NSSize(width: 320, height: 1400))) }
+        var sampleT = 0.0, renderT = 0.0
+        let n = 20
+        for _ in 0..<n {
+            RunLoop.main.run(until: Date().addingTimeInterval(1))
+            let t0 = cpuNow()
+            m.debugTick()
+            let t1 = cpuNow()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))   // let SwiftUI apply the update
+            for h in hosts { h.layoutSubtreeIfNeeded() }
+            let t2 = cpuNow()
+            sampleT += t1 - t0; renderT += t2 - t1
+        }
+        print(String(format: "per tick: sampling %.1f ms, SwiftUI update+layout (dashboard+panel) %.1f ms (avg of %d)", sampleT / Double(n) * 1000, renderT / Double(n) * 1000, n))
     }
 
     private static func render<V: View>(_ view: V, size: NSSize?, dark: Bool, to path: String) {

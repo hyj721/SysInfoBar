@@ -9,7 +9,7 @@ let package = Package(
             name: "SysInfoBar",
             path: "Sources/SysInfoBar",
             swiftSettings: [.unsafeFlags(["-Osize"])],
-            linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("ServiceManagement")]
+            linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("ServiceManagement"), .linkedFramework("CoreWLAN")]
         )
     ]
 )
