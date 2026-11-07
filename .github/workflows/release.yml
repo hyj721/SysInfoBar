@@ -1,0 +1,79 @@
+name: Release
+
+# Push a tag like v1.2.0 to build SysInfoBar.app and publish a GitHub Release with the zip.
+#   git tag v1.2.0 && git push origin v1.2.0
+# Or run it by hand from the Actions tab (workflow_dispatch) with a version.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the leading v, e.g. 1.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15   # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${INPUT_VERSION#v}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build and pack
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build.sh zip
+
+      - name: Smoke test (read system info once)
+        run: build/SysInfoBar.app/Contents/MacOS/SysInfoBar --dump
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          ZIP="build/SysInfoBar-${VERSION}.zip"
+          cat > notes.md <<'EOF'
+          ### 安装
+          1. 下载下面的 `SysInfoBar-*.zip`，解压后把 `SysInfoBar.app` 拖进「应用程序」。
+          2. 应用没有经过 Apple 公证，第一次打开会被拦截。在终端执行一次：
+             `xattr -dr com.apple.quarantine /Applications/SysInfoBar.app`
+             或者在「系统设置 → 隐私与安全性」里点「仍要打开」。
+
+          需要 macOS 14 及以上、Apple Silicon。
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$ZIP" \
+              --title "SysInfoBar $TAG" \
+              --notes-file notes.md \
+              --generate-notes \
+              --target "$GITHUB_SHA"
+          fi
