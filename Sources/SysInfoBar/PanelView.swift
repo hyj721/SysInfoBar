@@ -3,60 +3,73 @@ import AppKit
 
 struct PanelView: View {
     @EnvironmentObject var m: Monitor
+    @EnvironmentObject var settings: AppSettings
 
     var body: some View {
         let info = m.info, s = m.snap
         VStack(alignment: .leading, spacing: 14) {
             header(info)
-            StatusLine(status: s.status)
+            if settings.shows(.status) { StatusLine(status: s.status, lang: settings.language) }
 
             Divider()
 
-            MetricRow(icon: "cpu", title: "CPU",
-                      subtitle: "\(info.cpuBrand) · \(info.pCores)P + \(info.eCores)E",
-                      value: percent(s.cpuTotal), fraction: s.cpuTotal) {
-                CoreBars(values: s.cpuPerCore, pCores: info.pCores, eCores: info.eCores)
+            if settings.shows(.cpu) {
+                MetricRow(icon: "cpu", title: "CPU",
+                          subtitle: "\(info.cpuBrand) · \(info.pCores)P + \(info.eCores)E",
+                          value: Fmt.percent(s.cpuTotal), fraction: s.cpuTotal) {
+                    CoreBars(values: s.cpuPerCore, pCores: info.pCores, eCores: info.eCores, lang: settings.language)
+                }
             }
 
-            MetricRow(icon: "memorychip", title: "内存",
-                      subtitle: "Swap \(mem(s.swapUsed))",
-                      value: "\(mem(s.memUsed)) / \(mem(info.memTotal))",
-                      fraction: Double(s.memUsed) / Double(max(info.memTotal, 1)))
+            if settings.shows(.memory) {
+                MetricRow(icon: "memorychip", title: tr("内存", "Memory"),
+                          subtitle: "Swap \(Fmt.mem(s.swapUsed)) · " + tr("压力 ", "Pressure ") + pressureText(s.status.memPressure),
+                          value: "\(Fmt.mem(s.memUsed)) / \(Fmt.mem(info.memTotal))",
+                          fraction: Double(s.memUsed) / Double(max(info.memTotal, 1)))
+            }
 
-            if let gpu = info.gpuName {
+            if settings.shows(.gpu), let gpu = info.gpuName {
                 MetricRow(icon: "rectangle.3.group", title: "GPU",
-                          subtitle: info.gpuCores.map { "\(gpu) · \($0) 核" } ?? gpu,
-                          value: s.gpuUtil.map(percent) ?? "—",
+                          subtitle: info.gpuCores.map { "\(gpu) · " + tr("\($0) 核", "\($0) cores") } ?? gpu,
+                          value: s.gpuUtil.map(Fmt.percent) ?? "—",
                           fraction: s.gpuUtil ?? 0)
             }
 
-            MetricRow(icon: "internaldrive", title: "磁盘",
-                      subtitle: "\(s.volumeName) · 可用 \(disk(s.diskFree))",
-                      value: "\(disk(s.diskTotal - s.diskFree)) / \(disk(s.diskTotal))",
-                      fraction: s.diskTotal > 0 ? Double(s.diskTotal - s.diskFree) / Double(s.diskTotal) : 0)
+            if settings.shows(.disk) {
+                MetricRow(icon: "internaldrive", title: tr("磁盘", "Disk"),
+                          subtitle: "\(s.volumeName) · " + tr("可用 ", "Free ") + Fmt.disk(s.diskFree),
+                          value: "\(Fmt.disk(s.diskTotal - s.diskFree)) / \(Fmt.disk(s.diskTotal))",
+                          fraction: s.diskTotal > 0 ? Double(s.diskTotal - s.diskFree) / Double(s.diskTotal) : 0)
+            }
 
-            MetricRow(icon: "network", title: "网络",
-                      subtitle: [s.netIface, s.netIP].compactMap { $0 }.joined(separator: " · ").ifEmpty("未连接"),
-                      value: "↓ \(rate(s.netDown))   ↑ \(rate(s.netUp))",
-                      fraction: nil, tint: .indigo)
+            if settings.shows(.network) {
+                MetricRow(icon: "network", title: tr("网络", "Network"),
+                          subtitle: [s.netIface, s.netIP].compactMap { $0 }.joined(separator: " · ")
+                            .ifEmpty(tr("未连接", "Not connected")),
+                          value: "↓ \(Fmt.rate(s.netDown))   ↑ \(Fmt.rate(s.netUp))",
+                          fraction: nil, tint: .indigo)
+            }
 
             if let b = s.battery {
-                MetricRow(icon: batteryIcon(b), title: "电池",
-                          subtitle: batterySubtitle(b),
-                          value: "\(b.percent)%",
-                          fraction: Double(b.percent) / 100,
-                          tint: b.percent <= 20 && !b.pluggedIn ? .red : .green)
-                if let w = b.systemWatts {
-                    MetricRow(icon: "bolt.fill", title: "功耗",
+                if settings.shows(.battery) {
+                    MetricRow(icon: batteryIcon(b), title: tr("电池", "Battery"),
+                              subtitle: batterySubtitle(b),
+                              value: "\(b.percent)%",
+                              fraction: Double(b.percent) / 100,
+                              tint: b.percent <= 20 && !b.pluggedIn ? .red : .green)
+                }
+                if settings.shows(.power), let w = b.systemWatts {
+                    MetricRow(icon: "bolt.fill", title: tr("功耗", "Power"),
                               subtitle: powerSubtitle(b),
                               value: String(format: "%.1f W", w),
                               fraction: nil, tint: .yellow)
                 }
             }
 
-            Divider()
-
-            ProcessTable(cpu: s.topCPU, mem: s.topMem)
+            if settings.shows(.processes) {
+                Divider()
+                ProcessTable(cpu: Array(s.topCPU.prefix(3)), mem: Array(s.topMem.prefix(3)), lang: settings.language)
+            }
 
             Divider()
 
@@ -64,7 +77,7 @@ struct PanelView: View {
         }
         .padding(16)
         .frame(width: 320)
-        .background(VisibilityReporter(onChange: { m.setVisible($0) },
+        .background(VisibilityReporter(onChange: { m.setPanelVisible($0) },
                                        register: { m.isPanelVisible = $0 }))
     }
 
@@ -85,52 +98,30 @@ struct PanelView: View {
     }
 
     private func footer(_ s: Snapshot) -> some View {
-        HStack(spacing: 10) {
-            Label(uptime(s.uptime), systemImage: "clock")
+        HStack(spacing: 12) {
+            Label(Fmt.uptime(s.uptime), systemImage: "clock")
                 .font(.caption).foregroundStyle(.secondary)
                 .labelStyle(.titleAndIcon)
+                .lineLimit(1)
             Spacer()
-            Toggle("开机启动", isOn: Binding(get: { m.launchAtLogin },
-                                          set: { m.toggleLaunchAtLogin($0) }))
-                .toggleStyle(.checkbox)
-                .font(.caption)
-            Button {
-                NSApp.terminate(nil)
-            } label: {
-                Image(systemName: "power")
-            }
-            .buttonStyle(.borderless)
-            .help("退出")
+            Button { WindowManager.shared.showDashboard() } label: { Image(systemName: "macwindow") }
+                .help(tr("打开窗口", "Open window"))
+            Button { WindowManager.shared.showSettings() } label: { Image(systemName: "gearshape") }
+                .help(tr("设置", "Settings"))
+            Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
+                .help(tr("退出", "Quit"))
         }
+        .buttonStyle(.borderless)
     }
 
     // MARK: formatting
 
-    private func rate(_ b: Double) -> String {
-        switch b {
-        case ..<1_000: return "\(Int(b)) B/s"
-        case ..<1_000_000: return String(format: "%.0f KB/s", b / 1_000)
-        default: return String(format: "%.1f MB/s", b / 1_000_000)
-        }
-    }
     private func powerSubtitle(_ b: Snapshot.Battery) -> String {
         var parts: [String] = []
-        if let a = b.adapterWatts { parts.append("充电器 \(a) W") }
-        if let t = b.temperature { parts.append(String(format: "电池 %.1f °C", t)) }
-        return parts.isEmpty ? "整机" : "整机 · " + parts.joined(separator: " · ")
-    }
-    private func percent(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
-    private func mem(_ b: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(b), countStyle: .memory)
-    }
-    private func disk(_ b: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
-    }
-    private func uptime(_ t: TimeInterval) -> String {
-        let m = Int(t) / 60, d = m / 1440, h = (m % 1440) / 60, mm = m % 60
-        if d > 0 { return "已运行 \(d) 天 \(h) 小时" }
-        if h > 0 { return "已运行 \(h) 小时 \(mm) 分" }
-        return "已运行 \(mm) 分钟"
+        if let a = b.adapterWatts { parts.append(tr("充电器 \(a) W", "\(a) W charger")) }
+        if let t = b.temperature { parts.append(tr("电池 ", "Battery ") + settings.temperature(t)) }
+        let whole = tr("整机", "Whole system")
+        return parts.isEmpty ? whole : whole + " · " + parts.joined(separator: " · ")
     }
     private func batteryIcon(_ b: Snapshot.Battery) -> String {
         if b.charging || b.pluggedIn { return "battery.100percent.bolt" }
@@ -144,12 +135,14 @@ struct PanelView: View {
     }
     private func batterySubtitle(_ b: Snapshot.Battery) -> String {
         var parts: [String] = []
-        if b.charging { parts.append("充电中") }
-        else if b.pluggedIn { parts.append("已接电源") }
-        else if let r = b.minutesRemaining { parts.append("剩余 \(r / 60):\(String(format: "%02d", r % 60))") }
-        else { parts.append("使用电池") }
-        if let h = b.health { parts.append("健康 \(h)%") }
-        if let c = b.cycles { parts.append("循环 \(c)") }
+        if b.charging { parts.append(tr("充电中", "Charging")) }
+        else if b.pluggedIn { parts.append(tr("已接电源", "Plugged in")) }
+        else if let r = b.minutesRemaining {
+            parts.append(tr("剩余 ", "") + "\(r / 60):\(String(format: "%02d", r % 60))" + tr("", " left"))
+        }
+        else { parts.append(tr("使用电池", "On battery")) }
+        if let h = b.health { parts.append(tr("健康 \(h)%", "Health \(h)%")) }
+        if let c = b.cycles { parts.append(tr("循环 \(c)", "\(c) cycles")) }
         return parts.joined(separator: " · ")
     }
 }
@@ -215,7 +208,6 @@ struct Bar: View {
             }
         }
         .frame(height: 5)
-        .animation(.easeOut(duration: 0.4), value: fraction)
     }
 }
 
@@ -224,6 +216,7 @@ struct CoreBars: View {
     let values: [Double]
     let pCores: Int
     let eCores: Int
+    let lang: AppLanguage
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
             ForEach(Array(values.enumerated()), id: \.offset) { i, v in
@@ -236,9 +229,8 @@ struct CoreBars: View {
                 .frame(height: 16)
             }
         }
-        .animation(.easeOut(duration: 0.4), value: values)
         .padding(.top, 2)
-        .help("每个核心的使用率（青色为能效核）")
+        .help(tr("每个核心的使用率（青色为能效核）", "Per-core usage (teal = efficiency cores)"))
     }
 }
 
@@ -299,33 +291,35 @@ extension String {
 
 struct StatusLine: View {
     let status: SystemStatus
+    let lang: AppLanguage
     var body: some View {
         HStack(spacing: 6) {
-            chip("负载", status.load.map { String(format: "%.1f", $0) }.joined(separator: " "), loadColor)
-            chip("内存压力", pressure.0, pressure.1)
-            chip("温控", thermal.0, thermal.1)
+            chip(tr("负载", "Load"), status.load.map { String(format: "%.1f", $0) }.joined(separator: " "), loadColor)
+            chip(tr("内存压力", "Memory"), pressureText(status.memPressure), pressureColor)
+            chip(tr("温控", "Thermal"), thermalText(status.thermal), thermalColor)
         }
-        .help("负载：1 / 5 / 15 分钟平均；温控：系统热状态，偏热以上会降频")
+        .help(tr("负载：1 / 5 / 15 分钟平均；温控：系统热状态，偏热以上会降频",
+                 "Load: 1 / 5 / 15 minute averages. Thermal: system thermal state; above Normal the CPU throttles"))
     }
 
     private var loadColor: Color {
         let per = status.load[0] / Double(max(ProcessInfo.processInfo.activeProcessorCount, 1))
         return per < 0.7 ? .green : per < 1 ? .orange : .red
     }
-    private var pressure: (String, Color) {
+    private var pressureColor: Color {
         switch status.memPressure {
-        case 4: return ("严重", .red)
-        case 2: return ("紧张", .orange)
-        default: return ("正常", .green)
+        case 4: return .red
+        case 2: return .orange
+        default: return .green
         }
     }
-    private var thermal: (String, Color) {
+    private var thermalColor: Color {
         switch status.thermal {
-        case .nominal: return ("正常", .green)
-        case .fair: return ("偏热", .yellow)
-        case .serious: return ("很热", .orange)
-        case .critical: return ("严重", .red)
-        @unknown default: return ("—", .gray)
+        case .nominal: return .green
+        case .fair: return .yellow
+        case .serious: return .orange
+        case .critical: return .red
+        @unknown default: return .gray
         }
     }
 
@@ -347,22 +341,24 @@ struct StatusLine: View {
 struct ProcessTable: View {
     let cpu: [ProcStat]
     let mem: [ProcStat]
+    let lang: AppLanguage
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Image(systemName: "list.bullet.rectangle").foregroundStyle(.secondary)
-                Text("我的进程").font(.system(size: 13, weight: .semibold))
+                Text(tr("我的进程", "My processes")).font(.system(size: 13, weight: .semibold))
                 Spacer()
             }
             HStack(alignment: .top, spacing: 14) {
-                column("CPU", cpu) { "\(Int(($0 * 100).rounded()))%" }
-                column("内存", mem) { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) }
+                column("CPU", cpu) { "\(Int(($0.cpu * 100).rounded()))%" }
+                column(tr("内存", "Memory"), mem) { Fmt.mem($0.mem) }
             }
         }
-        .help("只统计当前用户的进程；系统进程需要管理员权限才能读取")
+        .help(tr("只统计当前用户的进程；系统进程需要管理员权限才能读取",
+                 "Only your own processes; system processes need admin rights to read"))
     }
 
-    private func column(_ title: String, _ items: [ProcStat], _ fmt: @escaping (Double) -> String) -> some View {
+    private func column(_ title: String, _ items: [ProcStat], _ fmt: @escaping (ProcStat) -> String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).font(.caption2).foregroundStyle(.secondary)
             if items.isEmpty {
@@ -372,7 +368,7 @@ struct ProcessTable: View {
                 HStack(spacing: 4) {
                     Text(p.name).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 2)
-                    Text(fmt(p.value)).monospacedDigit().foregroundStyle(.secondary)
+                    Text(fmt(p)).monospacedDigit().foregroundStyle(.secondary)
                 }
                 .font(.system(size: 11))
             }

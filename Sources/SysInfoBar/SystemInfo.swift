@@ -116,6 +116,10 @@ struct Snapshot {
     var cpuTotal: Double = 0          // 0...1
     var cpuPerCore: [Double] = []
     var memUsed: UInt64 = 0
+    var memApp: UInt64 = 0
+    var memWired: UInt64 = 0
+    var memCompressed: UInt64 = 0
+    var memCached: UInt64 = 0             // file-backed + purgeable
     var swapUsed: UInt64 = 0
     var gpuUtil: Double?              // 0...1
     var diskTotal: Int64 = 0
@@ -232,6 +236,10 @@ final class Sampler {
             let app = UInt64(stats.internal_page_count) - UInt64(stats.purgeable_count)
             let used = app + UInt64(stats.wire_count) + UInt64(stats.compressor_page_count)
             s.memUsed = used * pageSize
+            s.memApp = app * pageSize
+            s.memWired = UInt64(stats.wire_count) * pageSize
+            s.memCompressed = UInt64(stats.compressor_page_count) * pageSize
+            s.memCached = (UInt64(stats.external_page_count) + UInt64(stats.purgeable_count)) * pageSize
         }
         if let swap = Sysctl.value("vm.swapusage", as: xsw_usage.self) {
             s.swapUsed = swap.xsu_used

@@ -61,7 +61,8 @@ final class NetworkSampler {
 struct ProcStat: Identifiable, Equatable {
     let pid: pid_t
     let name: String
-    let value: Double   // CPU: fraction of one core; memory: bytes
+    let cpu: Double     // fraction of one core (can exceed 1)
+    let mem: Double     // bytes (physical footprint)
     var id: pid_t { pid }
 }
 
@@ -75,7 +76,7 @@ final class ProcessSampler {
     }()
     private var pids = [pid_t](repeating: 0, count: 2048)
 
-    func sample(top n: Int = 3) -> (cpu: [ProcStat], mem: [ProcStat]) {
+    func sample(top n: Int = 10) -> (cpu: [ProcStat], mem: [ProcStat]) {
         let bytes = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
         if bytes <= 0 { return ([], []) }
         let count = min(Int(bytes), pids.count)
@@ -83,8 +84,10 @@ final class ProcessSampler {
         let dt = now - prevAt
         var cpuNow: [pid_t: UInt64] = [:]
         cpuNow.reserveCapacity(count)
-        var cpu: [(pid_t, Double)] = []
-        var mem: [(pid_t, Double)] = []
+        struct Row { let pid: pid_t; let cpu: Double; let mem: Double }
+        var rows: [Row] = []
+        rows.reserveCapacity(count)
+        let haveDelta = !prevCPU.isEmpty && dt > 0
 
         for pid in pids.prefix(count) where pid > 0 {
             var ri = rusage_info_v2()
@@ -96,18 +99,22 @@ final class ProcessSampler {
             guard ok == 0 else { continue }
             let t = UInt64(Double(ri.ri_user_time + ri.ri_system_time) * ticksToNs)
             cpuNow[pid] = t
-            if let old = prevCPU[pid], dt > 0, t >= old {
-                cpu.append((pid, Double(t - old) / 1e9 / dt))
-            }
-            mem.append((pid, Double(ri.ri_phys_footprint)))
+            var c = 0.0
+            if haveDelta, let old = prevCPU[pid], t >= old { c = Double(t - old) / 1e9 / dt }
+            rows.append(Row(pid: pid, cpu: c, mem: Double(ri.ri_phys_footprint)))
         }
         prevCPU = cpuNow
         prevAt = now
 
-        func top(_ a: [(pid_t, Double)]) -> [ProcStat] {
-            a.sorted { $0.1 > $1.1 }.prefix(n).map { ProcStat(pid: $0.0, name: Self.name(of: $0.0), value: $0.1) }
+        var names: [pid_t: String] = [:]
+        func top(_ key: KeyPath<Row, Double>) -> [ProcStat] {
+            rows.sorted { $0[keyPath: key] > $1[keyPath: key] }.prefix(n).map { r in
+                let name = names[r.pid] ?? Self.name(of: r.pid)
+                names[r.pid] = name
+                return ProcStat(pid: r.pid, name: name, cpu: r.cpu, mem: r.mem)
+            }
         }
-        return (top(cpu), top(mem))
+        return (haveDelta ? top(\.cpu) : [], top(\.mem))
     }
 
     private static func name(of pid: pid_t) -> String {
