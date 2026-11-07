@@ -19,7 +19,7 @@ struct SysInfoBarApp: App {
             PanelView()
                 .environmentObject(monitor)
         } label: {
-            Image(systemName: "gauge.with.dots.needle.33percent")
+            Image(nsImage: MenuBarIcon.image)
         }
         .menuBarExtraStyle(.window)
     }

@@ -26,6 +26,8 @@
 ./build.sh install    # 生成后复制到 /Applications 并启动
 ```
 
+应用图标在 `Resources/AppIcon.icns`，由 `swift scripts/make-icon.swift` 生成（改图标后重新运行它）；菜单栏图标在 `Sources/SysInfoBar/MenuBarIcon.swift` 里用代码绘制。
+
 ## 运行
 
 ```bash
